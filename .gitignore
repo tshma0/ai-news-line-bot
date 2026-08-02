@@ -1,17 +1,18 @@
-# Pythonのキャッシュ・自動生成ファイル
+# Python キャッシュ
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 
-# 環境変数・一時ファイル
+# 環境変数・秘密情報ファイル（絶対リポジトリに入れない）
 .env
-*.log
+*.env
 
-# OS作成の不要ファイル
+# ログ・個人履歴・ローカル生成ファイル
+*.log
+notified_history.json
+news_dashboard.html
+
+# OS設定
 .DS_Store
 Thumbs.db
-
-#その他
-news_dashboard.html
-__pycache__
-gas

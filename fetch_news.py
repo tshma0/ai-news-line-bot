@@ -29,6 +29,7 @@ RSS_URLS = [
 ]
 
 # スコアリングルール
+MAX_LINE_MESSAGE_LENGTH = 1900
 SCORE_RULES = {
     "companies": {
         "openai": 50, "anthropic": 50, "google": 50, "gemini": 50, "claude": 50,
@@ -108,7 +109,7 @@ def summarize_with_gemini(title, url):
     if not GEMINI_API_KEY:
         return None
 
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    candidate_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
 
     if google_genai is not None:
         try:
@@ -137,10 +138,34 @@ def summarize_with_gemini(title, url):
 
     return None
 
-def send_line_message(text):
-    if len(text) > 1900:
-        text = text[:1900] + "\n...(省略)"
+def build_notification_messages(articles, summaries):
+    blocks = []
+    for article, summary in zip(articles, summaries):
+        if summary:
+            block = f"📰 【AIニュース】(Score: {article['score']})\n■ {article['title']}\n\n{summary}\n\n🔗 {article['link']}"
+        else:
+            block = f"📰 【AIニュース速報】(Score: {article['score']})\n■ {article['title']}\n\n🔗 {article['link']}"
+        blocks.append(block)
 
+    messages = []
+    for block in blocks:
+        if len(block) <= MAX_LINE_MESSAGE_LENGTH:
+            messages.append(block)
+            continue
+
+        chunks = []
+        start = 0
+        while start < len(block):
+            end = min(start + MAX_LINE_MESSAGE_LENGTH, len(block))
+            chunks.append(block[start:end])
+            start = end
+
+        messages.extend(chunks)
+
+    return messages
+
+
+def send_line_message(text):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
@@ -198,20 +223,19 @@ def main():
         print("通知対象の新しいニュースはありませんでした。")
         return
 
-    # スコア上位（最大2件）を要約して1通で送る
-    messages = []
-    for item in articles_to_notify[:2]:
-        summary = summarize_with_gemini(item["title"], item["link"])
-        if summary:
-            msg_block = f"📰 【AIニュース】(Score: {item['score']})\n■ {item['title']}\n\n{summary}\n\n🔗 {item['link']}"
-        else:
-            msg_block = f"📰 【AIニュース速報】(Score: {item['score']})\n■ {item['title']}\n\n🔗 {item['link']}"
-        messages.append(msg_block)
+    # スコア上位（最大2件）を要約して複数メッセージに分けて送る
+    top_articles = articles_to_notify[:2]
+    summaries = [summarize_with_gemini(item["title"], item["link"]) for item in top_articles]
+    messages = build_notification_messages(top_articles, summaries)
 
-    full_message = "\n\n" + ("="*20) + "\n\n".join(messages)
-    
     # LINEに送信
-    if send_line_message(full_message):
+    success = True
+    for message in messages:
+        if not send_line_message(message):
+            success = False
+            break
+
+    if success:
         save_history(new_notified_urls)
         print("LINEへの送信が成功しました。")
 

@@ -28,3 +28,13 @@ def test_select_top_articles_limits_to_two():
     selected = fetch_news.select_top_articles(articles)
     assert len(selected) == 2
     assert all(item["title"] for item in selected)
+
+
+def test_build_notification_messages_splits_long_text():
+    articles = [{"title": "OpenAIが発表", "score": 90, "link": "https://example.com/1"}]
+    summaries = ["x" * 6000]
+
+    messages = fetch_news.build_notification_messages(articles, summaries)
+
+    assert len(messages) >= 2
+    assert all(len(message) <= fetch_news.MAX_LINE_MESSAGE_LENGTH for message in messages)

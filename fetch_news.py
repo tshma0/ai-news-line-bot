@@ -2,16 +2,12 @@ import os
 import json
 import requests
 import feedparser
-import google.generativeai as genai
+from google import genai
 
 # === 環境変数から設定を取得 ===
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# Gemini APIの初期化
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 # 記事重複チェック用のキャッシュファイル
 HISTORY_FILE = "notified_history.json"
@@ -84,20 +80,24 @@ def summarize_with_gemini(title, url):
         f"「・」で始まる箇条書きのみ出力し、前置き・後書きは不要です。"
     )
     
-    # 動作実績のある標準的なモデル名を順番に試す
-    candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
-    
+    if not GEMINI_API_KEY:
+        return None
+
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
     for model_name in candidate_models:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+            )
             if response and response.text:
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini ({model_name}) Summarize Warning: {e}")
             continue
 
-    # 要約が取得できない場合は None を返す
     return None
 
 def send_line_message(text):
@@ -168,7 +168,6 @@ def main():
         if summary:
             msg_block = f"📰 【AIニュース】(Score: {item['score']})\n■ {item['title']}\n\n{summary}\n\n🔗 {item['link']}"
         else:
-            # Gemini要約が失敗した場合はタイトルとリンクのみ送る
             msg_block = f"📰 【AIニュース速報】(Score: {item['score']})\n■ {item['title']}\n\n🔗 {item['link']}"
         messages.append(msg_block)
 
@@ -176,7 +175,6 @@ def main():
     
     # LINEに送信
     if send_line_message(full_message):
-        # 送信に成功した場合のみ履歴を保存
         save_history(new_notified_urls)
         print("LINEへの送信が成功しました。")
 

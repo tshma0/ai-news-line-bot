@@ -60,10 +60,10 @@ def save_history(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(list(history), f, ensure_ascii=False, indent=2)
 
-def calculate_score(title):
+def score_title(title):
     score = 0
     title_lower = title.lower()
-    
+
     for word, pts in SCORE_RULES["companies"].items():
         if word in title_lower:
             score += pts
@@ -73,8 +73,27 @@ def calculate_score(title):
     for word, pts in SCORE_RULES["topic_keywords"].items():
         if word in title_lower:
             score += pts
-            
+
     return score
+
+
+def calculate_score(title):
+    return score_title(title)
+
+
+def select_top_articles(articles):
+    scored_articles = []
+    for article in articles:
+        title = article.get("title", "")
+        score = score_title(title)
+        scored_articles.append({
+            "title": title,
+            "score": score,
+            "url": article.get("url") or article.get("link") or "",
+        })
+
+    scored_articles.sort(key=lambda x: x["score"], reverse=True)
+    return scored_articles[:2]
 
 def summarize_with_gemini(title, url):
     prompt = (
@@ -113,24 +132,35 @@ def main():
     notified_urls = load_history()
     new_notified_urls = set(notified_urls)
     articles_to_notify = []
+    total_articles = 0
 
+    print("--- 取得記事一覧とスコア判定 ---")
     for rss_url in RSS_URLS:
         feed = feedparser.parse(rss_url)
         for entry in feed.entries:
             link = entry.link
             title = entry.title
+            total_articles += 1
+
+            score = score_title(title)
+            passed = score >= SCORE_RULES["min_score"]
+            status = "Pass" if passed else "Skip"
+            print(f"[Score: {score} / {status}] {title}")
 
             if link in notified_urls:
                 continue
 
-            score = calculate_score(title)
-            if score >= SCORE_RULES["min_score"]:
+            if passed:
                 articles_to_notify.append({
                     "title": title,
                     "link": link,
                     "score": score
                 })
                 new_notified_urls.add(link)
+
+    print("---------------------------------")
+    print(f"取得総件数: {total_articles}")
+    print(f"スコア条件をクリアした件数: {len(articles_to_notify)}")
 
     # スコアが高い順に並び替え
     articles_to_notify.sort(key=lambda x: x["score"], reverse=True)

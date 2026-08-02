@@ -24,6 +24,26 @@ try:
 except ImportError:
     google_generativeai = None
 
+def _load_env_file():
+    env_paths = [
+        r"C:\SecretKey\MyEnvironment.env",
+        os.path.join(os.path.dirname(__file__), ".env")
+    ]
+    for path in env_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            if k.strip() not in os.environ:
+                                os.environ[k.strip()] = v.strip()
+            except Exception:
+                pass
+
+_load_env_file()
+
 # === 環境変数から設定を取得 ===
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")

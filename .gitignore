@@ -1,0 +1,12 @@
+# Pythonのキャッシュ・自動生成ファイル
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 環境変数・一時ファイル
+.env
+*.log
+
+# OS作成の不要ファイル
+.DS_Store
+Thumbs.db

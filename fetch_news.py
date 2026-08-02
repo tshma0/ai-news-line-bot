@@ -196,27 +196,54 @@ def select_balanced_articles(articles, max_total=30):
 
 
 
+def shorten_url_if_needed(url):
+    """長すぎるURL（Google Newsの articles/ 等）を is.gd で短縮URL（~20文字）に変換する"""
+    if not url:
+        return url
+    
+    # 120文字以上の長いURL、または news.google.com が残っている場合は短縮APIを実行
+    if len(url) > 120 or "news.google.com/rss/articles/" in url:
+        try:
+            api_url = f"https://is.gd/create.php?format=json&url={requests.utils.quote(url)}"
+            res = requests.get(api_url, timeout=3)
+            if res.status_code == 200:
+                data = res.json()
+                if "shorturl" in data:
+                    return data["shorturl"]
+        except Exception as e:
+            print(f"URL短縮エラー (fallback to orig): {e}")
+    
+    return url
+
+
 def resolve_final_url(url):
-    """Google News RSSの長いURLから実際の元記事の直リンクを取得する"""
-    if not url or "news.google.com/rss/articles/" not in url:
+    """Google News RSSの長いURLから実際の元記事の直リンクを取得し、必要に応じて短縮URL化する"""
+    if not url:
         return url
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    try:
-        res = requests.head(url, headers=headers, allow_redirects=True, timeout=4)
-        if res.status_code == 200 and "news.google.com" not in res.url:
-            return res.url
-        res = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=4)
-        if res.status_code == 200 and "news.google.com" not in res.url:
-            return res.url
-    except Exception as e:
-        print(f"URL resolve fallback for {url[:40]}...: {e}")
+    
+    final_url = url
+    if "news.google.com/rss/articles/" in url:
+        try:
+            res = requests.head(url, headers=headers, allow_redirects=True, timeout=4)
+            if res.status_code == 200 and "news.google.com" not in res.url:
+                final_url = res.url
+            else:
+                res = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=4)
+                if res.status_code == 200 and "news.google.com" not in res.url:
+                    final_url = res.url
+        except Exception as e:
+            print(f"URL resolve fallback for {url[:40]}...: {e}")
 
-    if "?" in url:
-        return url.split("?")[0]
-    return url
+    # クエリパラメータ除去
+    if "news.google.com" in final_url and "?" in final_url:
+        final_url = final_url.split("?")[0]
+
+    # それでも120文字を超過、または Google News URL の場合は短縮URLに変換してLINE等のリンク切れを絶対防止
+    return shorten_url_if_needed(final_url)
 
 
 def is_google_ai_article(title):
@@ -279,7 +306,7 @@ def get_category_badge_html(cat):
 
 def build_dashboard_html(articles, sheet_url):
     """
-    保存済み全ニュース（最大30件）をスマホ最適化UI、トップ5別枠、カテゴリフィルター付きで構築する
+    保存済み全ニュース（最大30件）をスマホ最適化3段レイアウト、トップ5別枠、カテゴリフィルター、最上部戻るボタン付きで構築する
     """
     top_5_articles = articles[:5]
 
@@ -289,19 +316,21 @@ def build_dashboard_html(articles, sheet_url):
         title = escape(article.get("title", ""))
         link = escape(article.get("link") or article.get("url") or "")
         score = article.get("score", 0)
+        saved_at = escape(article.get("saved_at", "🕒 最新"))
         cat = detect_category(title)
         cat_badge = get_category_badge_html(cat)
 
         top5_cards_html += f"""
         <div class="top5-card" data-category="{cat}">
-          <div class="card-header">
+          <div class="card-header-row">
             <span class="top-rank">🏆 第{i}位</span>
             <span class="badge badge-high">🔥 {score} pts</span>
             {cat_badge}
           </div>
-          <h3 class="top5-title">{title}</h3>
-          <div class="card-footer">
-            <a href="{link}" target="_blank" rel="noreferrer" class="btn-primary">記事を読む &rarr;</a>
+          <h3 class="card-title-row">{title}</h3>
+          <div class="card-footer-row">
+            <span class="save-time">{saved_at}</span>
+            <a href="{link}" target="_blank" rel="noreferrer" class="btn-read">記事を読む &rarr;</a>
           </div>
         </div>
         """
@@ -312,6 +341,7 @@ def build_dashboard_html(articles, sheet_url):
         title = escape(article.get("title", ""))
         link = escape(article.get("link") or article.get("url") or "")
         score = article.get("score", 0)
+        saved_at = escape(article.get("saved_at", "🕒 最新"))
         cat = detect_category(title)
         cat_badge = get_category_badge_html(cat)
 
@@ -327,14 +357,15 @@ def build_dashboard_html(articles, sheet_url):
 
         cards_html += f"""
         <div class="news-card" data-category="{cat}">
-          <div class="card-header">
+          <div class="card-header-row">
             <span class="card-num">#{i}</span>
             <span class="badge {badge_class}">{badge_label}</span>
             {cat_badge}
           </div>
-          <h3 class="card-title">{title}</h3>
-          <div class="card-footer">
-            <a href="{link}" target="_blank" rel="noreferrer" class="btn-link">記事を読む &rarr;</a>
+          <h3 class="card-title-row">{title}</h3>
+          <div class="card-footer-row">
+            <span class="save-time">{saved_at}</span>
+            <a href="{link}" target="_blank" rel="noreferrer" class="btn-read">記事を読む &rarr;</a>
           </div>
         </div>
         """
@@ -368,7 +399,7 @@ def build_dashboard_html(articles, sheet_url):
       font-family: 'Noto Sans JP', sans-serif;
       background-color: var(--bg-color);
       color: var(--text-main);
-      padding: 1rem 0.75rem;
+      padding: 0.75rem 0.5rem;
       line-height: 1.5;
       word-break: break-all;
       overflow-wrap: anywhere;
@@ -376,62 +407,65 @@ def build_dashboard_html(articles, sheet_url):
     .container {{
       max-width: 1000px;
       margin: 0 auto;
+      padding-bottom: 3rem;
     }}
     header {{
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
-      padding-bottom: 1.25rem;
+      padding-bottom: 1rem;
       border-bottom: 1px solid var(--card-border);
-      margin-bottom: 1.25rem;
+      margin-bottom: 1rem;
     }}
     .logo-area h1 {{
       font-family: 'Outfit', 'Noto Sans JP', sans-serif;
-      font-size: 1.6rem;
+      font-size: 1.5rem;
       background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }}
     .logo-area p {{
       color: var(--text-muted);
-      font-size: 0.85rem;
+      font-size: 0.8rem;
+      margin-top: 0.2rem;
     }}
     .header-btn {{
       display: block;
       text-align: center;
       background: linear-gradient(135deg, #2563eb, #1d4ed8);
       color: #fff;
-      padding: 0.75rem 1rem;
+      padding: 0.6rem 1rem;
       border-radius: 8px;
       text-decoration: none;
       font-weight: 500;
-      font-size: 0.9rem;
+      font-size: 0.85rem;
     }}
 
     /* 絞り込みフィルターバー */
     .filter-section {{
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }}
     .filter-title {{
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       color: var(--text-muted);
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.4rem;
       font-weight: 500;
     }}
     .filter-bar {{
       display: flex;
       flex-wrap: wrap;
-      gap: 0.4rem;
+      gap: 0.35rem;
     }}
     .filter-btn {{
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       color: var(--text-main);
-      padding: 0.4rem 0.8rem;
+      padding: 0.35rem 0.7rem;
       border-radius: 20px;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       font-weight: 500;
       cursor: pointer;
+      white-space: nowrap;
       transition: all 0.2s;
     }}
     .filter-btn:hover, .filter-btn.active {{
@@ -442,54 +476,33 @@ def build_dashboard_html(articles, sheet_url):
     }}
 
     .section-title {{
-      font-size: 1.2rem;
+      font-size: 1.1rem;
       font-weight: 700;
-      margin-bottom: 1rem;
+      margin: 1.25rem 0 0.85rem 0;
       display: flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.4rem;
       color: var(--accent-gold);
     }}
     .top5-container {{
       display: flex;
       flex-direction: column;
-      gap: 1rem;
-      margin-bottom: 2.5rem;
+      gap: 0.85rem;
+      margin-bottom: 2rem;
     }}
     .top5-card {{
       background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-      border: 2px solid rgba(250, 204, 21, 0.4);
-      border-radius: 12px;
-      padding: 1.25rem;
-    }}
-    .top-rank {{
-      font-family: 'Outfit', sans-serif;
-      font-weight: 700;
-      color: var(--accent-gold);
-      font-size: 0.95rem;
-    }}
-    .top5-title {{
-      font-size: 1.05rem;
-      font-weight: 700;
-      margin: 0.5rem 0 1rem 0;
-      color: #ffffff;
-    }}
-    .btn-primary {{
-      display: inline-block;
-      background: rgba(56, 189, 248, 0.15);
-      color: var(--accent-blue);
-      border: 1px solid rgba(56, 189, 248, 0.4);
-      padding: 0.5rem 1rem;
-      border-radius: 6px;
-      text-decoration: none;
-      font-size: 0.85rem;
-      font-weight: 600;
+      border: 2px solid rgba(250, 204, 21, 0.45);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      display: flex;
+      flex-direction: column;
     }}
 
     .news-grid {{
       display: grid;
       grid-template-columns: 1fr;
-      gap: 1rem;
+      gap: 0.85rem;
     }}
     @media (min-width: 640px) {{
       .news-grid {{ grid-template-columns: repeat(2, 1fr); }}
@@ -500,38 +513,51 @@ def build_dashboard_html(articles, sheet_url):
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 10px;
-      padding: 1rem;
+      padding: 0.85rem 1rem;
       display: flex;
       flex-direction: column;
-      justify-content: space-between;
     }}
-    .card-header {{
+
+    /* === 📱 スマホ用3段レイアウト === */
+    .card-header-row {{
       display: flex;
       align-items: center;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 0.4rem;
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.4rem;
+      overflow-x: auto;
+      white-space: nowrap;
+    }}
+    .top-rank {{
+      font-family: 'Outfit', sans-serif;
+      font-weight: 700;
+      color: var(--accent-gold);
+      font-size: 0.85rem;
+      white-space: nowrap;
     }}
     .card-num {{
       font-family: 'Outfit', sans-serif;
       color: var(--text-muted);
       font-size: 0.8rem;
+      white-space: nowrap;
     }}
     .badge {{
-      font-size: 0.7rem;
+      font-size: 0.75rem;
       font-weight: 700;
-      padding: 0.15rem 0.5rem;
+      padding: 0.15rem 0.45rem;
       border-radius: 12px;
+      white-space: nowrap;
     }}
     .badge-high {{ background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.4); }}
     .badge-med {{ background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }}
     .badge-low {{ background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }}
     
     .tag-cat {{
-      font-size: 0.7rem;
+      font-size: 0.75rem;
       font-weight: 700;
-      padding: 0.15rem 0.5rem;
+      padding: 0.15rem 0.45rem;
       border-radius: 12px;
+      white-space: nowrap;
     }}
     .tag-google {{ background: rgba(96, 165, 250, 0.2); color: #93c5fd; border: 1px solid rgba(96, 165, 250, 0.4); }}
     .tag-openai {{ background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); }}
@@ -540,21 +566,61 @@ def build_dashboard_html(articles, sheet_url):
     .tag-business {{ background: rgba(20, 184, 166, 0.2); color: #2dd4bf; border: 1px solid rgba(20, 184, 166, 0.4); }}
     .tag-other {{ background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }}
 
-    .card-title {{
+    .card-title-row {{
       font-size: 0.95rem;
-      font-weight: 500;
+      font-weight: 600;
       color: var(--text-main);
-      margin-bottom: 0.85rem;
+      line-height: 1.45;
+      margin: 0.35rem 0 0.65rem 0;
     }}
-    .card-footer {{
+
+    .card-footer-row {{
       display: flex;
-      justify-content: flex-end;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: auto;
+      padding-top: 0.35rem;
     }}
-    .btn-link {{
+    .save-time {{
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }}
+    .btn-read {{
+      display: inline-block;
+      background: rgba(56, 189, 248, 0.15);
       color: var(--accent-blue);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
       text-decoration: none;
-      font-size: 0.85rem;
-      font-weight: 500;
+      font-size: 0.8rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+
+    .scroll-to-top-btn {{
+      position: fixed;
+      bottom: 1.25rem;
+      left: 1.25rem;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #2563eb);
+      color: #ffffff;
+      border: none;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+      font-weight: 700;
+      cursor: pointer;
+      z-index: 999;
+      transition: transform 0.2s, opacity 0.2s;
+    }}
+    .scroll-to-top-btn:active {{
+      transform: scale(0.9);
     }}
   </style>
 </head>
@@ -593,6 +659,9 @@ def build_dashboard_html(articles, sheet_url):
       {cards_html}
     </main>
   </div>
+
+  <!-- 📍 画面左下に固定配置の最上部に戻るボタン -->
+  <button class="scroll-to-top-btn" onclick="window.scrollTo({{top: 0, behavior: 'smooth'}})" title="一番上に戻る">▲</button>
 
   <script>
     function filterCategory(cat, btn) {{
@@ -637,7 +706,7 @@ def save_articles_to_sheets(articles, sheet_webapp_url):
     }
 
     try:
-        res = requests.post(sheet_webapp_url, json=payload, timeout=20)
+        res = requests.post(sheet_webapp_url, json=payload, timeout=60)
     except requests.RequestException as e:
         print(f"Sheets 保存リクエストエラー: {e}")
         return False

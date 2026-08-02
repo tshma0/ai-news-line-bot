@@ -1,8 +1,18 @@
 import os
+import sys
 import json
+import re
+import difflib
 from html import escape
 import requests
 import feedparser
+
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 
 try:
     from google import genai as google_genai
@@ -239,29 +249,94 @@ def summarize_with_gemini(title, url):
     return None
 
 
-def build_notification_messages(articles, summaries):
-    blocks = []
-    for article, summary in zip(articles, summaries):
+def normalize_title(title):
+    """タイトルから出展・メディア表記や記号を除去して正規化する"""
+    t = re.sub(r'[\(（].*?[\)）]', '', title)
+    t = re.sub(r'\s*[\-\|ー—]\s*.*$', '', t)
+    t = re.sub(r'[^\w\s]', '', t)
+    return t.strip().lower()
+
+def is_similar_title(t1, t2, threshold=0.55):
+    """2つのニュースタイトルが類似しているかチェックする"""
+    n1 = normalize_title(t1)
+    n2 = normalize_title(t2)
+
+    if not n1 or not n2:
+        return False
+
+    if n1 in n2 or n2 in n1:
+        return True
+
+    ratio = difflib.SequenceMatcher(None, n1, n2).ratio()
+    if ratio >= threshold:
+        return True
+
+    words1 = set(re.findall(r'\w{2,}', n1))
+    words2 = set(re.findall(r'\w{2,}', n2))
+    if words1 and words2:
+        jaccard = len(words1 & words2) / len(words1 | words2)
+        if jaccard >= 0.45:
+            return True
+
+    return False
+
+def filter_similar_articles(articles):
+    """スコアが高い順にソートされた記事から、重複・類似トピックを除外する"""
+    unique_articles = []
+    for article in articles:
+        is_dup = False
+        for saved in unique_articles:
+            if is_similar_title(article["title"], saved["title"]):
+                is_dup = True
+                print(f"[重複除外] 「{article['title']}」 (類似元: 「{saved['title']}」)")
+                break
+        if not is_dup:
+            unique_articles.append(article)
+    return unique_articles
+
+
+def build_notification_messages(top_articles, summaries, other_count, sheet_webapp_url=""):
+    """
+    スコア上位ニュース（最大5件）とその他件数・Web App URLを1つの集約メッセージとして組み立てる。
+    """
+    blocks = ["🤖【本日のAIニュース厳選まとめ】\n"]
+    for i, (article, summary) in enumerate(zip(top_articles, summaries), 1):
         if summary:
-            block = f"📰 【AIニュース】(Score: {article['score']})\n■ {article['title']}\n\n{summary}\n\n🔗 {article['link']}"
+            block = f"{i}. 📰 (Score: {article['score']})\n■ {article['title']}\n{summary}\n🔗 {article['link']}"
         else:
-            block = f"📰 【AIニュース速報】(Score: {article['score']})\n■ {article['title']}\n\n🔗 {article['link']}"
+            block = f"{i}. 📰 【速報】(Score: {article['score']})\n■ {article['title']}\n🔗 {article['link']}"
         blocks.append(block)
 
+    footer = "\n--------------------------------"
+    if other_count > 0:
+        footer += f"\n📊 その他 {other_count} 件のニュースを以下のウェブアプリに追加しました："
+    else:
+        footer += "\n📊 本日のニュース一覧は以下のウェブアプリで確認できます："
+
+    if sheet_webapp_url:
+        footer += f"\n🔗 {sheet_webapp_url}"
+    else:
+        footer += f"\n(※Web App URL未設定)"
+
+    blocks.append(footer)
+
+    full_message = "\n\n".join(blocks)
+
+    if len(full_message) <= MAX_LINE_MESSAGE_LENGTH:
+        return [full_message]
+
+    # 文字数制限(1900文字)を超える場合のフォールバック分割処理
     messages = []
+    current_msg = ""
     for block in blocks:
-        if len(block) <= MAX_LINE_MESSAGE_LENGTH:
-            messages.append(block)
-            continue
-
-        chunks = []
-        start = 0
-        while start < len(block):
-            end = min(start + MAX_LINE_MESSAGE_LENGTH, len(block))
-            chunks.append(block[start:end])
-            start = end
-
-        messages.extend(chunks)
+        if len(current_msg) + len(block) + 2 <= MAX_LINE_MESSAGE_LENGTH:
+            current_msg = (current_msg + "\n\n" + block).strip()
+        else:
+            if current_msg:
+                messages.append(current_msg)
+            current_msg = block
+    if current_msg:
+        messages.append(current_msg)
 
     return messages
 
@@ -331,6 +406,10 @@ def main():
     # スコアが高い順に並び替え
     articles_to_notify.sort(key=lambda x: x["score"], reverse=True)
 
+    # 類似・重複トピックのニュースを除外
+    articles_to_notify = filter_similar_articles(articles_to_notify)
+    print(f"類似除外後の通知対象件数: {len(articles_to_notify)}")
+
     if not articles_to_notify:
         print("通知対象の新しいニュースはありませんでした。")
         return
@@ -344,14 +423,16 @@ def main():
         f.write(dashboard_html)
     print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に保存しました。")
 
-    # スコア上位（最大2件）を要約して複数メッセージに分けて送る
-    top_articles = articles_to_notify[:2]
+    # スコア上位（最大5件）を要約して1つのまとめメッセージに送る
+    top_articles = articles_to_notify[:5]
+    other_count = len(articles_to_notify) - len(top_articles)
+
     summaries = []
     for item in top_articles:
         summary = summarize_with_gemini(item["title"], item["link"])
         summaries.append(summary)
 
-    messages = build_notification_messages(top_articles, summaries)
+    messages = build_notification_messages(top_articles, summaries, other_count, NEWS_SHEETS_WEBAPP_URL)
 
     # LINEに送信
     success = True
@@ -365,4 +446,4 @@ def main():
         print("LINEへの送信が成功しました。")
 
 if __name__ == "__main__":
-    main()
+    main()

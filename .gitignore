@@ -10,3 +10,7 @@ __pycache__/
 # OS作成の不要ファイル
 .DS_Store
 Thumbs.db
+
+#その他
+news_dashboard.html
+__pycache__

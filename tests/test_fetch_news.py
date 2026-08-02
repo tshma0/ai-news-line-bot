@@ -14,6 +14,11 @@ def test_score_title_highlights_ai_releases():
     assert fetch_news.score_title(title) >= 60
 
 
+def test_get_max_saved_articles_uses_env_override(monkeypatch):
+    monkeypatch.setenv("MAX_SAVED_ARTICLES", "7")
+    assert fetch_news.get_max_saved_articles() == 7
+
+
 def test_score_title_ignores_unrelated_articles():
     title = "ローカルイベントの開催情報"
     assert fetch_news.score_title(title) < 60
@@ -38,3 +43,17 @@ def test_build_notification_messages_splits_long_text():
 
     assert len(messages) >= 2
     assert all(len(message) <= fetch_news.MAX_LINE_MESSAGE_LENGTH for message in messages)
+
+
+def test_build_dashboard_html_contains_summary_and_links():
+    articles = [
+        {"title": "OpenAIが新モデルを発表", "link": "https://example.com/1"},
+        {"title": "Anthropicが新機能を公開", "link": "https://example.com/2"},
+    ]
+
+    html = fetch_news.build_dashboard_html(articles, "https://example.com/sheet")
+
+    assert "代表ニュース（5件）" in html
+    assert "保存済みニュース件数" in html
+    assert "https://example.com/1" in html
+    assert "https://example.com/sheet" in html

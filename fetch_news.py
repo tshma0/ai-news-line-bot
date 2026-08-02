@@ -1,5 +1,6 @@
 import os
 import json
+from html import escape
 import requests
 import feedparser
 
@@ -20,6 +21,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # 記事重複チェック用のキャッシュファイル
 HISTORY_FILE = "notified_history.json"
+DEFAULT_MAX_SAVED_ARTICLES = 30
+NEWS_DASHBOARD_FILE = "news_dashboard.html"
+NEWS_SHEETS_WEBAPP_URL = (
+    os.environ.get("NEWS_SHEETS_WEBAPP_URL") or os.environ.get("SHEETS_WEBAPP_URL") or ""
+)
 
 # RSSフィード一覧（Google News RSS）
 RSS_URLS = [
@@ -65,6 +71,15 @@ def save_history(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(list(history), f, ensure_ascii=False, indent=2)
 
+def get_max_saved_articles():
+    """保存するニュース件数の上限を環境変数またはデフォルト値から取得する。"""
+    raw_value = os.environ.get("MAX_SAVED_ARTICLES", str(DEFAULT_MAX_SAVED_ARTICLES))
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_MAX_SAVED_ARTICLES
+
+
 def score_title(title):
     score = 0
     title_lower = title.lower()
@@ -82,7 +97,7 @@ def score_title(title):
     return score
 
 
-def select_top_articles(articles):
+def select_top_articles(articles, limit=2):
     scored_articles = []
     for article in articles:
         title = article.get("title", "")
@@ -94,7 +109,92 @@ def select_top_articles(articles):
         })
 
     scored_articles.sort(key=lambda x: x["score"], reverse=True)
-    return scored_articles[:2]
+    return scored_articles[:limit]
+
+
+def build_dashboard_payload(articles, sheet_url):
+    representative_news = [
+        {"title": article["title"], "link": article.get("link") or article.get("url") or ""}
+        for article in articles[:5]
+    ]
+    return {
+        "representative_news": representative_news,
+        "saved_count": len(articles),
+        "sheet_link": sheet_url or "",
+    }
+
+
+def build_dashboard_html(articles, sheet_url):
+    payload = build_dashboard_payload(articles, sheet_url)
+    items_html = ""
+    for item in payload["representative_news"]:
+        link = escape(item.get("link") or "")
+        title = escape(item.get("title") or "")
+        if link:
+            items_html += f'<li><a href="{link}" target="_blank" rel="noreferrer">{title}</a></li>'
+        else:
+            items_html += f"<li>{title}</li>"
+
+    if payload["sheet_link"]:
+        sheet_link_html = (
+            f'<p><strong>保存先:</strong> <a href="{escape(payload["sheet_link"])}" '
+            'target="_blank" rel="noreferrer">Google Sheets</a></p>'
+        )
+    else:
+        sheet_link_html = "<p><strong>保存先:</strong> 未設定</p>"
+
+    return f"""<!doctype html>
+<html lang=\"ja\">
+<head>
+  <meta charset=\"utf-8\" />
+  <title>AIニュースダッシュボード</title>
+  <style>
+    body {{ font-family: sans-serif; margin: 2rem; line-height: 1.6; }}
+    .card {{ border: 1px solid #ddd; padding: 1rem 1.25rem; border-radius: 8px; max-width: 900px; }}
+    li {{ margin-bottom: 0.5rem; }}
+  </style>
+</head>
+<body>
+  <div class=\"card\">
+    <h1>AIニュースダッシュボード</h1>
+    <h2>代表ニュース（5件）</h2>
+    <ul>{items_html}</ul>
+    <p><strong>保存済みニュース件数:</strong> {payload['saved_count']}件</p>
+    {sheet_link_html}
+  </div>
+</body>
+</html>
+"""
+
+
+def save_articles_to_sheets(articles, sheet_webapp_url):
+    """Google Apps Script Web App にニュースを送って Sheets に保存する。"""
+    if not sheet_webapp_url:
+        print("Google Sheets への保存先URLが未設定のため、保存をスキップしました。")
+        return False
+
+    payload = {
+        "news": [
+            {
+                "title": article["title"],
+                "link": article.get("link") or article.get("url") or "",
+                "score": article.get("score", 0),
+            }
+            for article in articles
+        ],
+        "saved_count": len(articles),
+        "sheet_link": sheet_webapp_url,
+    }
+
+    try:
+        res = requests.post(sheet_webapp_url, json=payload, timeout=20)
+    except requests.RequestException as e:
+        print(f"Sheets 保存リクエストエラー: {e}")
+        return False
+
+    print(f"Sheets API Status Code: {res.status_code}")
+    print(f"Sheets API Response: {res.text}")
+    return res.status_code in (200, 201)
 
 
 def summarize_with_gemini(title, url):
@@ -234,6 +334,15 @@ def main():
     if not articles_to_notify:
         print("通知対象の新しいニュースはありませんでした。")
         return
+
+    max_saved_articles = get_max_saved_articles()
+    saved_articles = articles_to_notify[:max_saved_articles]
+    save_articles_to_sheets(saved_articles, NEWS_SHEETS_WEBAPP_URL)
+
+    dashboard_html = build_dashboard_html(saved_articles, NEWS_SHEETS_WEBAPP_URL)
+    with open(NEWS_DASHBOARD_FILE, "w", encoding="utf-8") as f:
+        f.write(dashboard_html)
+    print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に保存しました。")
 
     # スコア上位（最大2件）を要約して複数メッセージに分けて送る
     top_articles = articles_to_notify[:2]

@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /d c:\\\\AI-News-bot\\\\ai-news-line-bot; \\$envFile = 'C:\\\\SecretKey\\\\MyEnvironment\\.env'; Get-Content \\$envFile \\| ForEach-Object \\{ if \\(\\$_ -and -not \\$_\\.StartsWith\\('#'\\)\\) \\{ \\$name, \\$value = \\$_ -split '=', 2; if \\(\\$name\\) \\{ \\[System\\.Environment\\]::SetEnvironmentVariable\\(\\$name\\.Trim\\(\\), \\$value\\.Trim\\(\\), 'Process'\\) \\} \\} \\}; \\$text = '📰 【AIニュース速報】\\(Score: 100\\)\n■ OpenAIが新モデルを発表\n\n🔗 https://example\\.com'; \\$len = \\$text\\.Length; Write-Host \"message_length=\\$len\"; Write-Host \"message_length_bytes=\\$\\(\\[System\\.Text\\.Encoding\\]::UTF8\\.GetByteCount\\(\\$text\\)\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

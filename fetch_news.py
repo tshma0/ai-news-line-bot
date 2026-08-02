@@ -1,152 +1,158 @@
-import json
 import os
-import re
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
-
-import feedparser
+import json
 import requests
-from google import generativeai as genai
+import feedparser
+import google.generativeai as genai
 
+# === 環境変数から設定を取得 ===
+LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# Gemini APIの初期化
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# 記事重複チェック用のキャッシュファイル
+HISTORY_FILE = "notified_history.json"
+
+# RSSフィード一覧（Google News RSS）
 RSS_URLS = [
     "https://news.google.com/rss/search?q=OpenAI&hl=ja&gl=JP&ceid=JP:ja",
     "https://news.google.com/rss/search?q=Anthropic&hl=ja&gl=JP&ceid=JP:ja",
-    "https://news.google.com/rss/search?q=Google%20Gemini&hl=ja&gl=JP&ceid=JP:ja",
+    "https://news.google.com/rss/search?q=Google+Gemini&hl=ja&gl=JP&ceid=JP:ja",
 ]
 
-HISTORY_PATH = "notified_history.json"
+# スコアリングルール
+SCORE_RULES = {
+    "companies": {
+        "openai": 50, "anthropic": 50, "google": 50, "gemini": 50, "claude": 50,
+        "meta": 40, "xai": 40, "grok": 40, "llama": 40, "mistral": 30,
+    },
+    "release_keywords": {
+        "発表": 20, "リリース": 20, "新モデル": 25, "launch": 20, "release": 20,
+        "introducing": 20, "update": 15, "available": 10,
+    },
+    "topic_keywords": {
+        "agent": 10, "mcp": 15, "reasoning": 10, "multimodal": 10, "api": 5,
+    },
+    "min_score": 60,
+}
 
+def load_history():
+    """履歴ファイル(リスト形式 []) を安全に読み込む"""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return set(data)
+                elif isinstance(data, dict):
+                    # 万が一辞書型で入っていた場合の互換処理
+                    return set(data.get("urls", []))
+        except Exception as e:
+            print(f"History load warning: {e}")
+            return set()
+    return set()
 
-def load_history() -> Dict[str, Any]:
-    if not os.path.exists(HISTORY_PATH):
-        return {"articles": []}
-    with open(HISTORY_PATH, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+def save_history(history):
+    """通知済みURLのセットをJSON配列として保存"""
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(history), f, ensure_ascii=False, indent=2)
 
-
-def save_history(history: Dict[str, Any]) -> None:
-    with open(HISTORY_PATH, "w", encoding="utf-8") as fh:
-        json.dump(history, fh, ensure_ascii=False, indent=2)
-
-
-def score_title(title: str) -> int:
-    text = title.lower()
+def calculate_score(title):
     score = 0
-    keywords = [
-        ("openai", 25),
-        ("anthropic", 25),
-        ("google", 20),
-        ("gemini", 20),
-        ("発表", 15),
-        ("リリース", 15),
-        ("新モデル", 15),
-        ("ai", 10),
-        ("llm", 10),
-        ("model", 10),
-        ("chatgpt", 20),
-        ("claude", 20),
-        ("deepmind", 20),
-        ("copilot", 15),
-    ]
-    for keyword, value in keywords:
-        if keyword in text:
-            score += value
-    if re.search(r"(が|を|で).*(発表|リリース|公開)", text):
-        score += 10
-    return min(score, 100)
+    title_lower = title.lower()
+    
+    for word, pts in SCORE_RULES["companies"].items():
+        if word in title_lower:
+            score += pts
+    for word, pts in SCORE_RULES["release_keywords"].items():
+        if word in title_lower:
+            score += pts
+    for word, pts in SCORE_RULES["topic_keywords"].items():
+        if word in title_lower:
+            score += pts
+            
+    return score
 
-
-def select_top_articles(articles: List[Dict[str, Any]], limit: int = 2) -> List[Dict[str, Any]]:
-    scored = []
-    for article in articles:
-        title = article.get("title", "")
-        score = score_title(title)
-        if score >= 60:
-            scored.append({**article, "score": score})
-    scored.sort(key=lambda item: item["score"], reverse=True)
-    return scored[:limit]
-
-
-def fetch_rss_articles() -> List[Dict[str, Any]]:
-    articles: List[Dict[str, Any]] = []
-    for url in RSS_URLS:
-        feed = feedparser.parse(url)
-        for entry in feed.entries:
-            title = getattr(entry, "title", "") or ""
-            link = getattr(entry, "link", "") or ""
-            if title and link:
-                articles.append({"title": title, "url": link})
-    return articles
-
-
-def summarize_article(title: str, url: str, api_key: str) -> str:
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
+def summarize_with_gemini(title, url):
     prompt = (
-        "次のニュース記事について、日本語で箇条書き3行以内で要約してください。"
-        f"\nタイトル: {title}\nURL: {url}"
+        f"以下のAI関連ニュース記事のタイトルとURLをもとに、内容を推測して日本語で要約してください。\n"
+        f"タイトル: {title}\n"
+        f"URL: {url}\n\n"
+        f"要約は箇条書き3点以内で、各項目は20字以内に収めてください。\n"
+        f"「・」で始まる箇条書きのみ出力し、前置き・後書きは不要です。"
     )
-    response = model.generate_content(prompt)
-    text = getattr(response, "text", "") or ""
-    return text.strip() or "要約を生成できませんでした。"
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Summarize Error: {e}")
+        return "・要約の生成に失敗しました"
 
-
-def send_line_notification(message: str, token: str, user_id: str) -> None:
+def send_line_message(text):
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
     payload = {
-        "to": user_id,
-        "messages": [{"type": "text", "text": message}],
+        "to": LINE_USER_ID,
+        "messages": [{"type": "text", "text": text}]
     }
-    response = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    response.raise_for_status()
+    res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
+    print(f"LINE API Status Code: {res.status_code}")
+    print(f"LINE API Response: {res.text}")
+    return res.status_code == 200
 
-
-def main() -> None:
-    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-    line_user_id = os.getenv("LINE_USER_ID")
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-
-    if not line_token or not line_user_id or not gemini_api_key:
+def main():
+    if not all([LINE_ACCESS_TOKEN, LINE_USER_ID, GEMINI_API_KEY]):
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID, GEMINI_API_KEY を環境変数に設定してください")
 
-    history = load_history()
-    notified_urls = {item.get("url") for item in history.get("articles", []) if item.get("url")}
+    notified_urls = load_history()
+    new_notified_urls = set(notified_urls)
+    articles_to_notify = []
 
-    articles = fetch_rss_articles()
-    filtered = [article for article in articles if article.get("url") not in notified_urls]
-    selected = select_top_articles(filtered)
+    for rss_url in RSS_URLS:
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries:
+            link = entry.link
+            title = entry.title
 
-    if not selected:
-        print("新しい関連記事はありません")
+            if link in notified_urls:
+                continue
+
+            score = calculate_score(title)
+            if score >= SCORE_RULES["min_score"]:
+                articles_to_notify.append({
+                    "title": title,
+                    "link": link,
+                    "score": score
+                })
+                new_notified_urls.add(link)
+
+    # スコアが高い順に並び替え
+    articles_to_notify.sort(key=lambda x: x["score"], reverse=True)
+
+    if not articles_to_notify:
+        print("通知対象の新しいニュースはありませんでした。")
         return
 
-    summaries = []
-    for article in selected:
-        summary = summarize_article(article["title"], article["url"], gemini_api_key)
-        summaries.append((article["title"], article["url"], summary))
+    # スコア上位（最大2件）を要約して1通で送る
+    messages = []
+    for item in articles_to_notify[:2]:
+        summary = summarize_with_gemini(item["title"], item["link"])
+        msg_block = f"📰 【AIニュース】(Score: {item['score']})\n■ {item['title']}\n\n{summary}\n\n🔗 {item['link']}"
+        messages.append(msg_block)
 
-    lines = ["AI関連ニュースの要約です。"]
-    for title, url, summary in summaries:
-        lines.append(f"- {title}\n{summary}\n{url}")
-    message = "\n\n".join(lines)
-
-    send_line_notification(message, line_token, line_user_id)
-
-    history.setdefault("articles", [])
-    history["articles"].extend(
-        [{"url": article["url"], "title": article["title"], "notified_at": datetime.now(timezone.utc).isoformat()} for article in selected]
-    )
-    save_history(history)
-
+    full_message = "\n\n" + ("="*20) + "\n\n".join(messages)
+    
+    # LINEに送信
+    if send_line_message(full_message):
+        # 送信に成功した場合のみ履歴を保存
+        save_history(new_notified_urls)
+        print("LINEへの送信が成功しました。")
 
 if __name__ == "__main__":
     main()

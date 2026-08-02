@@ -84,25 +84,25 @@ def summarize_with_gemini(title, url):
         f"「・」で始まる箇条書きのみ出力し、前置き・後書きは不要です。"
     )
     
-    # 利用可能な最新モデルを順に試行
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    # 動作実績のある標準的なモデル名を順番に試す
+    candidate_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"]
     
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
-            if response.text:
+            if response and response.text:
                 return response.text.strip()
         except Exception as e:
             print(f"Gemini ({model_name}) Summarize Warning: {e}")
             continue
 
-    return "・要約の生成に失敗しました"
+    # 要約が取得できない場合は None を返す
+    return None
 
 def send_line_message(text):
-    # LINEの1文字制限（2000文字）対策
     if len(text) > 1900:
-        text = text[:1900] + "\n...(文字数制限のため省略)"
+        text = text[:1900] + "\n...(省略)"
 
     headers = {
         "Content-Type": "application/json",
@@ -165,7 +165,11 @@ def main():
     messages = []
     for item in articles_to_notify[:2]:
         summary = summarize_with_gemini(item["title"], item["link"])
-        msg_block = f"📰 【AIニュース】(Score: {item['score']})\n■ {item['title']}\n\n{summary}\n\n🔗 {item['link']}"
+        if summary:
+            msg_block = f"📰 【AIニュース】(Score: {item['score']})\n■ {item['title']}\n\n{summary}\n\n🔗 {item['link']}"
+        else:
+            # Gemini要約が失敗した場合はタイトルとリンクのみ送る
+            msg_block = f"📰 【AIニュース速報】(Score: {item['score']})\n■ {item['title']}\n\n🔗 {item['link']}"
         messages.append(msg_block)
 
     full_message = "\n\n" + ("="*20) + "\n\n".join(messages)

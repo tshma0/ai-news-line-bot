@@ -105,11 +105,11 @@ def summarize_with_gemini(title, url):
         f"要約は箇条書き3点以内で、各項目は20字以内に収めてください。\n"
         f"「・」で始まる箇条書きのみ出力し、前置き・後書きは不要です。"
     )
-    
+
     if not GEMINI_API_KEY:
         return None
 
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
 
     if google_genai is not None:
         try:
@@ -129,7 +129,7 @@ def summarize_with_gemini(title, url):
             print(f"Gemini Client Error: {e}")
     elif google_generativeai is not None:
         try:
-            model = google_generativeai.GenerativeModel("gemini-1.5-flash")
+            model = google_generativeai.GenerativeModel("gemini-2.0-flash")
             response = model.generate_content(prompt)
             if response and getattr(response, "text", None):
                 return response.text.strip()
@@ -137,6 +137,7 @@ def summarize_with_gemini(title, url):
             print(f"Gemini Summarize Error: {e}")
 
     return None
+
 
 def build_notification_messages(articles, summaries):
     blocks = []
@@ -164,7 +165,6 @@ def build_notification_messages(articles, summaries):
 
     return messages
 
-
 def send_line_message(text):
     headers = {
         "Content-Type": "application/json",
@@ -174,9 +174,21 @@ def send_line_message(text):
         "to": LINE_USER_ID,
         "messages": [{"type": "text", "text": text}]
     }
-    res = requests.post("https://api.line.me/v2/bot/message/push", headers=headers, json=payload)
+    try:
+        res = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        print(f"LINE API Request Error: {e}")
+        return False
+
     print(f"LINE API Status Code: {res.status_code}")
     print(f"LINE API Response: {res.text}")
+    if res.status_code != 200:
+        print("LINE メッセージ送信に失敗しました。LINE のトークンやユーザー ID を確認してください。")
     return res.status_code == 200
 
 def main():
@@ -225,7 +237,11 @@ def main():
 
     # スコア上位（最大2件）を要約して複数メッセージに分けて送る
     top_articles = articles_to_notify[:2]
-    summaries = [summarize_with_gemini(item["title"], item["link"]) for item in top_articles]
+    summaries = []
+    for item in top_articles:
+        summary = summarize_with_gemini(item["title"], item["link"])
+        summaries.append(summary)
+
     messages = build_notification_messages(top_articles, summaries)
 
     # LINEに送信

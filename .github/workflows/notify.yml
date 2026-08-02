@@ -1,19 +1,11 @@
-name: Notify AI News
-
-name: AI News LINE Bot
-
 name: AI News LINE Bot
 
 on:
-  workflow_dispatch: # 手動実行用ボタン（残しておくと便利です）
-  schedule:
-    # 毎日 日本時間の 07:00, 12:00, 18:00, 22:00 に自動実行する設定
-    - cron: '0 22,3,9,14 * * *'
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    # （以下は既存のコードのまま）
 
     steps:
       - name: Checkout repository
@@ -33,15 +25,6 @@ jobs:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NEWS_SHEETS_WEBAPP_URL: ${{ secrets.NEWS_SHEETS_WEBAPP_URL }}
         run: |
           python fetch_news.py
-
-      - name: Commit and push updated history
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git status --porcelain | grep -q .; then
-            git add notified_history.json
-            git commit -m "Update notified history"
-            git push
-          fi

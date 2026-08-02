@@ -1,13 +1,19 @@
 name: Notify AI News
 
+name: AI News LINE Bot
+
+name: AI News LINE Bot
+
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手動実行用ボタン（残しておくと便利です）
+  schedule:
+    # 毎日 日本時間の 07:00, 12:00, 18:00, 22:00 に自動実行する設定
+    - cron: '0 22,3,9,13 * * *'
 
 jobs:
-  notify:
+  run-script:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    # （以下は既存のコードのまま）
 
     steps:
       - name: Checkout repository

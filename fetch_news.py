@@ -196,22 +196,25 @@ def select_balanced_articles(articles, max_total=30):
 
 
 
+try:
+    from googlenewsdecoder import new_decoderv1
+except ImportError:
+    new_decoderv1 = None
+
+
 def shorten_url_if_needed(url):
-    """長すぎるURL（Google Newsの articles/ 等）を is.gd で短縮URL（~20文字）に変換する"""
+    """長すぎるURL、または news.google.com が残っている場合に TinyURL 等で安全に短縮化する"""
     if not url:
         return url
     
-    # 120文字以上の長いURL、または news.google.com が残っている場合は短縮APIを実行
-    if len(url) > 120 or "news.google.com/rss/articles/" in url:
+    if len(url) > 120 or "news.google.com" in url:
         try:
-            api_url = f"https://is.gd/create.php?format=json&url={requests.utils.quote(url)}"
-            res = requests.get(api_url, timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                if "shorturl" in data:
-                    return data["shorturl"]
+            api_url = f"https://tinyurl.com/api-create.php?url={requests.utils.quote(url)}"
+            res = requests.get(api_url, timeout=4)
+            if res.status_code == 200 and res.text.startswith("http"):
+                return res.text.strip()
         except Exception as e:
-            print(f"URL短縮エラー (fallback to orig): {e}")
+            print(f"TinyURL 短縮フォールバックエラー: {e}")
     
     return url
 
@@ -221,28 +224,36 @@ def resolve_final_url(url):
     if not url:
         return url
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
     final_url = url
     if "news.google.com/rss/articles/" in url:
-        try:
-            res = requests.head(url, headers=headers, allow_redirects=True, timeout=4)
-            if res.status_code == 200 and "news.google.com" not in res.url:
-                final_url = res.url
-            else:
-                res = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=4)
+        # 1. googlenewsdecoder による直リンクデコード
+        if new_decoderv1:
+            try:
+                decoded_res = new_decoderv1(url)
+                if isinstance(decoded_res, dict) and decoded_res.get("status") and decoded_res.get("decoded_url"):
+                    final_url = decoded_res["decoded_url"]
+            except Exception as e:
+                print(f"googlenewsdecoder 解像エラー: {e}")
+
+        # 2. フォールバック: HTTPリダイレクト追跡
+        if "news.google.com" in final_url:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            try:
+                res = requests.head(url, headers=headers, allow_redirects=True, timeout=4)
                 if res.status_code == 200 and "news.google.com" not in res.url:
                     final_url = res.url
-        except Exception as e:
-            print(f"URL resolve fallback for {url[:40]}...: {e}")
+                else:
+                    res = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=4)
+                    if res.status_code == 200 and "news.google.com" not in res.url:
+                        final_url = res.url
+            except Exception as e:
+                pass
 
-    # クエリパラメータ除去
-    if "news.google.com" in final_url and "?" in final_url:
+    if "?" in final_url and "news.google.com" in final_url:
         final_url = final_url.split("?")[0]
 
-    # それでも120文字を超過、または Google News URL の場合は短縮URLに変換してLINE等のリンク切れを絶対防止
     return shorten_url_if_needed(final_url)
 
 

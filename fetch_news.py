@@ -48,7 +48,6 @@ def load_history():
                 if isinstance(data, list):
                     return set(data)
                 elif isinstance(data, dict):
-                    # 万が一辞書型で入っていた場合の互換処理
                     return set(data.get("urls", []))
         except Exception as e:
             print(f"History load warning: {e}")
@@ -76,25 +75,6 @@ def score_title(title):
 
     return score
 
-
-def calculate_score(title):
-    return score_title(title)
-
-
-def select_top_articles(articles):
-    scored_articles = []
-    for article in articles:
-        title = article.get("title", "")
-        score = score_title(title)
-        scored_articles.append({
-            "title": title,
-            "score": score,
-            "url": article.get("url") or article.get("link") or "",
-        })
-
-    scored_articles.sort(key=lambda x: x["score"], reverse=True)
-    return scored_articles[:2]
-
 def summarize_with_gemini(title, url):
     prompt = (
         f"以下のAI関連ニュース記事のタイトルとURLをもとに、内容を推測して日本語で要約してください。\n"
@@ -103,15 +83,27 @@ def summarize_with_gemini(title, url):
         f"要約は箇条書き3点以内で、各項目は20字以内に収めてください。\n"
         f"「・」で始まる箇条書きのみ出力し、前置き・後書きは不要です。"
     )
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"Gemini Summarize Error: {e}")
-        return "・要約の生成に失敗しました"
+    
+    # 利用可能な最新モデルを順に試行
+    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            if response.text:
+                return response.text.strip()
+        except Exception as e:
+            print(f"Gemini ({model_name}) Summarize Warning: {e}")
+            continue
+
+    return "・要約の生成に失敗しました"
 
 def send_line_message(text):
+    # LINEの1文字制限（2000文字）対策
+    if len(text) > 1900:
+        text = text[:1900] + "\n...(文字数制限のため省略)"
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"

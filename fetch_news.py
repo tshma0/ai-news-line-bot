@@ -2,7 +2,16 @@ import os
 import json
 import requests
 import feedparser
-from google import genai
+
+try:
+    from google import genai as google_genai
+except ImportError:
+    google_genai = None
+
+try:
+    import google.generativeai as google_generativeai
+except ImportError:
+    google_generativeai = None
 
 # === 環境変数から設定を取得 ===
 LINE_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -71,6 +80,22 @@ def score_title(title):
 
     return score
 
+
+def select_top_articles(articles):
+    scored_articles = []
+    for article in articles:
+        title = article.get("title", "")
+        score = score_title(title)
+        scored_articles.append({
+            "title": title,
+            "score": score,
+            "url": article.get("url") or article.get("link") or "",
+        })
+
+    scored_articles.sort(key=lambda x: x["score"], reverse=True)
+    return scored_articles[:2]
+
+
 def summarize_with_gemini(title, url):
     prompt = (
         f"以下のAI関連ニュース記事のタイトルとURLをもとに、内容を推測して日本語で要約してください。\n"
@@ -84,19 +109,31 @@ def summarize_with_gemini(title, url):
         return None
 
     candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash"]
-    client = genai.Client(api_key=GEMINI_API_KEY)
 
-    for model_name in candidate_models:
+    if google_genai is not None:
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-            )
-            if response and response.text:
+            client = google_genai.Client(api_key=GEMINI_API_KEY)
+            for model_name in candidate_models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                    )
+                    if response and getattr(response, "text", None):
+                        return response.text.strip()
+                except Exception as e:
+                    print(f"Gemini ({model_name}) Summarize Warning: {e}")
+                    continue
+        except Exception as e:
+            print(f"Gemini Client Error: {e}")
+    elif google_generativeai is not None:
+        try:
+            model = google_generativeai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(prompt)
+            if response and getattr(response, "text", None):
                 return response.text.strip()
         except Exception as e:
-            print(f"Gemini ({model_name}) Summarize Warning: {e}")
-            continue
+            print(f"Gemini Summarize Error: {e}")
 
     return None
 

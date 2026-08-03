@@ -202,7 +202,8 @@ def select_balanced_articles(articles, max_total=30):
 
 
 try:
-    from googlenewsdecoder import new_decoderv1
+    # pyrefly: ignore [missing-import]
+    from googlenewsdecoder import new_decoderv1  # type: ignore
 except ImportError:
     new_decoderv1 = None
 

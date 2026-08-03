@@ -15,12 +15,14 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 
 try:
-    from google import genai as google_genai
+    # pyrefly: ignore [missing-import]
+    from google import genai as google_genai  # type: ignore
 except ImportError:
     google_genai = None
 
 try:
-    import google.generativeai as google_generativeai
+    # pyrefly: ignore [missing-import]
+    import google.generativeai as google_generativeai  # type: ignore
 except ImportError:
     google_generativeai = None
 
@@ -54,9 +56,11 @@ HISTORY_FILE = "notified_history.json"
 DEFAULT_MAX_SAVED_ARTICLES = 30
 NEWS_DASHBOARD_FILE = "news_dashboard.html"
 MAX_ARTICLE_AGE_DAYS = 7  # 過去7日以内の新鮮なニュースのみを通知対象とする
-NEWS_SHEETS_WEBAPP_URL = (
-    os.environ.get("NEWS_SHEETS_WEBAPP_URL") or os.environ.get("SHEETS_WEBAPP_URL") or ""
-)
+def get_webapp_url():
+    """環境変数 NEWS_SHEETS_WEBAPP_URL から Web App URL を取得する"""
+    return os.environ.get("NEWS_SHEETS_WEBAPP_URL", "").strip()
+
+NEWS_SHEETS_WEBAPP_URL = get_webapp_url()
 
 # RSSフィード一覧（Google News RSS: when:7d で直近1週間以内に絞り込み）
 RSS_URLS = [
@@ -957,11 +961,12 @@ def main():
         print("通知対象の新しいニュースはありませんでした。")
         return
 
+    webapp_url = get_webapp_url()
     max_saved_articles = get_max_saved_articles()
     saved_articles = select_balanced_articles(articles_to_notify, max_saved_articles)
-    save_articles_to_sheets(saved_articles, NEWS_SHEETS_WEBAPP_URL)
+    save_articles_to_sheets(saved_articles, webapp_url)
 
-    dashboard_html = build_dashboard_html(saved_articles, NEWS_SHEETS_WEBAPP_URL)
+    dashboard_html = build_dashboard_html(saved_articles, webapp_url)
     with open(NEWS_DASHBOARD_FILE, "w", encoding="utf-8") as f:
         f.write(dashboard_html)
     print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に保存しました。")
@@ -975,7 +980,7 @@ def main():
         summary = summarize_with_gemini(item["title"], item["link"])
         summaries.append(summary)
 
-    messages = build_notification_messages(top_articles, summaries, other_count, NEWS_SHEETS_WEBAPP_URL)
+    messages = build_notification_messages(top_articles, summaries, other_count, webapp_url)
 
     # LINEに送信
     success = True

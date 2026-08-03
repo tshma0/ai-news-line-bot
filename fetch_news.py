@@ -5,6 +5,7 @@ import re
 import difflib
 from html import escape
 import requests
+# pyrefly: ignore [missing-import]
 import feedparser
 
 

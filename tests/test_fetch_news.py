@@ -103,3 +103,47 @@ def test_build_dashboard_html_contains_mobile_layout():
     assert "card-footer-row" in html
     assert "scroll-to-top-btn" in html
     assert "https://script.google.com/macros/s/test/exec" in html
+
+
+# === 6. 多層重複判定 ＆ 概要文活用 ＆ 0件通知テスト ===
+def test_is_duplicate_with_history_detects_past_similar_titles():
+    class DummyEntry:
+        def __init__(self, title, summary=""):
+            self.title = title
+            self.summary = summary
+            self.id = ""
+            self.published_parsed = (1970, 1, 1, 0, 16, 40, 3, 1, 0) # timestamp 1000 相当
+
+    entry = DummyEntry("【速報】Google Workspace新機能を発表", "Gmailの自動生成AI機能")
+    history = {
+        "urls": {"https://example.com/past"},
+        "articles": [
+            {
+                "title": "Google Workspace 新機能を発表",
+                "summary": "GmailにAI自動生成機能が導入されました",
+                "published": 1000,
+                "url": "https://example.com/past"
+            }
+        ]
+    }
+
+    is_dup, reason = fetch_news.is_duplicate_with_history(entry, "https://example.com/new", "https://example.com/new_final", history)
+    assert is_dup is True
+    assert "過去送信済み類似ニュース" in reason
+
+
+def test_build_no_news_message_returns_status():
+    msg = fetch_news.build_no_news_message("https://example.com/webapp")
+    assert "前回の配信から新しく追加されたニュースはありませんでした" in msg
+    assert "https://example.com/webapp" in msg
+
+
+# === 7. セキュリティ（SSRF対策、危険スキーム、危険TLD遮断）テスト ===
+def test_is_safe_url_blocks_malicious_and_private_urls():
+    assert fetch_news.is_safe_url("https://www.itmedia.co.jp/news") is True
+    assert fetch_news.is_safe_url("javascript:alert(1)") is False
+    assert fetch_news.is_safe_url("http://127.0.0.1/admin") is False
+    assert fetch_news.is_safe_url("http://192.168.1.1/secret") is False
+    assert fetch_news.is_safe_url("https://malicious.zip") is False
+
+

@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import difflib
+import datetime
 from html import escape
 import requests
 # pyrefly: ignore [missing-import]
@@ -119,24 +120,52 @@ def is_recent_article(entry, max_days=14):
 
 
 def load_history():
-    """履歴ファイル(リスト形式 []) を安全に読み込む"""
+    """
+    履歴ファイル (JSON) を安全に読み込み、
+    {"urls": set(), "articles": list()} の辞書形式で返す。
+    旧形式 (リスト ["url1", "url2"]) の場合は自動移行する。
+    """
+    default_res = {"urls": set(), "articles": []}
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return set(data)
+                    return {"urls": set(data), "articles": []}
                 elif isinstance(data, dict):
-                    return set(data.get("urls", []))
+                    urls = set(data.get("urls", []))
+                    articles = data.get("articles", [])
+                    return {"urls": urls, "articles": articles}
         except Exception as e:
             print(f"History load warning: {e}")
-            return set()
-    return set()
+            return default_res
+    return default_res
+
+def clean_old_history(history, max_days=14):
+    """max_days 日以上経過した古い articles 履歴を自動クリーンアップする"""
+    now = time.time()
+    cutoff = now - (max_days * 86400)
+    cleaned_articles = []
+
+    for item in history.get("articles", []):
+        pub = item.get("published") or 0
+        notified = item.get("notified_timestamp") or 0
+        ref_time = max(pub, notified)
+        if ref_time >= cutoff or ref_time == 0:
+            cleaned_articles.append(item)
+
+    history["articles"] = cleaned_articles
+    return history
 
 def save_history(history):
-    """通知済みURLのセットをJSON配列として保存"""
+    """通知済みURLおよび記事メタデータ（タイトル、概要、日付）のセットをJSONとして保存"""
+    history = clean_old_history(history, max_days=14)
+    data = {
+        "urls": list(history.get("urls", set())),
+        "articles": history.get("articles", [])
+    }
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(history), f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def get_max_saved_articles():
     """保存するニュース件数の上限を環境変数またはデフォルト値から取得する。"""
@@ -208,26 +237,84 @@ except ImportError:
     new_decoderv1 = None
 
 
-def shorten_url_if_needed(url):
-    """長すぎるURL、または news.google.com が残っている場合に TinyURL 等で安全に短縮化する"""
+import ipaddress
+from urllib.parse import urlparse, parse_qs, urlunparse
+
+SUSPICIOUS_TLDS = {".zip", ".mov", ".top", ".click", ".buzz", ".country", ".work", ".space"}
+
+def is_safe_url(url):
+    """
+    URLのセキュリティ検証を行う。
+    1. HTTP / HTTPS スキーム制限 (javascript:, data: 等を拒否)
+    2. SSRF対策 (127.0.0.1, 10.x, 192.168.x などのプライベートIP排除)
+    3. 危険TLD・ブラックリスト検証
+    """
+    if not url or not isinstance(url, str):
+        return False
+
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # SSRFチェック (IPアドレス直指定の場合のプライベートIP排除)
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                print(f"[セキュリティ遮断 (SSRF)] プライベートIPアクセスを検知: {hostname}")
+                return False
+        except ValueError:
+            pass
+
+        # 危険TLDチェック
+        lower_host = hostname.lower()
+        if any(lower_host.endswith(tld) for tld in SUSPICIOUS_TLDS):
+            print(f"[セキュリティ遮断 (危険TLD)] {hostname}")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"URL Safety Check Error: {e}")
+        return False
+
+def get_domain_name(url):
+    """URLから簡潔なドメイン名（例: itmedia.co.jp）を抽出する"""
+    if not url:
+        return ""
+    try:
+        hostname = urlparse(url).hostname or ""
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        return hostname
+    except Exception:
+        return ""
+
+def clean_url_parameters(url):
+    """外部サービスを使わずに、URLから不要なトラッキングパラメータ（utm_*, oc, fbclid 等）を削ぎ落としてスリム化する"""
     if not url:
         return url
-    
-    if len(url) > 120 or "news.google.com" in url:
-        try:
-            api_url = f"https://tinyurl.com/api-create.php?url={requests.utils.quote(url)}"
-            res = requests.get(api_url, timeout=4)
-            if res.status_code == 200 and res.text.startswith("http"):
-                return res.text.strip()
-        except Exception as e:
-            print(f"TinyURL 短縮フォールバックエラー: {e}")
-    
-    return url
+    try:
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
+        cleaned_params = {k: v for k, v in query_params.items() if not (k.startswith("utm_") or k in ["oc", "ref", "fbclid"])}
+        new_query = "&".join(f"{k}={v[0]}" for k, v in cleaned_params.items())
+        cleaned_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+        return cleaned_url
+    except Exception:
+        return url.split("?")[0] if ("?" in url and "news.google.com" in url) else url
+
+def shorten_url_if_needed(url):
+    """互換性のためのエイリアス（クエリパラメータのスリム化を行う）"""
+    return clean_url_parameters(url)
 
 
 def resolve_final_url(url):
-    """Google News RSSの長いURLから実際の元記事の直リンクを取得し、必要に応じて短縮URL化する"""
-    if not url:
+    """Google News RSSの長いURLから実際の元記事の直リンクを取得し、安全性チェックとスリム化を行う"""
+    if not url or not is_safe_url(url):
         return url
 
     final_url = url
@@ -237,7 +324,9 @@ def resolve_final_url(url):
             try:
                 decoded_res = new_decoderv1(url)
                 if isinstance(decoded_res, dict) and decoded_res.get("status") and decoded_res.get("decoded_url"):
-                    final_url = decoded_res["decoded_url"]
+                    cand_url = decoded_res["decoded_url"]
+                    if is_safe_url(cand_url):
+                        final_url = cand_url
             except Exception as e:
                 print(f"googlenewsdecoder 解像エラー: {e}")
 
@@ -248,19 +337,17 @@ def resolve_final_url(url):
             }
             try:
                 res = requests.head(url, headers=headers, allow_redirects=True, timeout=4)
-                if res.status_code == 200 and "news.google.com" not in res.url:
+                if res.status_code == 200 and "news.google.com" not in res.url and is_safe_url(res.url):
                     final_url = res.url
                 else:
                     res = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=4)
-                    if res.status_code == 200 and "news.google.com" not in res.url:
+                    if res.status_code == 200 and "news.google.com" not in res.url and is_safe_url(res.url):
                         final_url = res.url
             except Exception as e:
                 pass
 
-    if "?" in final_url and "news.google.com" in final_url:
-        final_url = final_url.split("?")[0]
-
-    return shorten_url_if_needed(final_url)
+    cleaned = clean_url_parameters(final_url)
+    return cleaned if is_safe_url(cleaned) else url
 
 
 def is_google_ai_article(title):
@@ -268,30 +355,53 @@ def is_google_ai_article(title):
     return detect_category(title) == "google"
 
 
-def score_title(title):
+def extract_summary(entry):
+    """RSS entry から概要文（summary / description）を取得してHTMLタグを除去する"""
+    raw = getattr(entry, "summary", "") or getattr(entry, "description", "") or ""
+    clean_text = re.sub(r'<[^>]+>', '', raw)
+    return clean_text.strip()
+
+def score_article(title, summary=""):
+    """タイトルと概要文をもとに重要度スコアを計算する（タイトルはフルポイント、概要文は部分加点）"""
     score = 0
     title_lower = title.lower()
+    summary_lower = summary.lower() if summary else ""
 
     for word, pts in SCORE_RULES["companies"].items():
         if word in title_lower:
             score += pts
+        elif summary_lower and word in summary_lower:
+            score += int(pts * 0.5)
+
     for word, pts in SCORE_RULES["release_keywords"].items():
         if word in title_lower:
             score += pts
+        elif summary_lower and word in summary_lower:
+            score += int(pts * 0.5)
+
     for word, pts in SCORE_RULES["topic_keywords"].items():
         if word in title_lower:
             score += pts
+        elif summary_lower and word in summary_lower:
+            score += int(pts * 0.5)
 
     # フィジカルAI・業務活用のボーナス加算
     physical_kw = ["フィジカルai", "physical ai", "ヒューマノイド", "ロボティクス", "ロボット ai"]
     if any(kw in title_lower for kw in physical_kw):
         score += 25
+    elif summary_lower and any(kw in summary_lower for kw in physical_kw):
+        score += 12
 
     business_kw = ["業務活用", "業務効率化", "開発自動化", "コード生成", "問い合わせ", "メール返信", "copilot", "cursor"]
     if any(kw in title_lower for kw in business_kw):
         score += 25
+    elif summary_lower and any(kw in summary_lower for kw in business_kw):
+        score += 12
 
     return score
+
+def score_title(title):
+    return score_article(title, "")
 
 
 
@@ -323,9 +433,20 @@ def get_category_badge_html(cat):
 
 def build_dashboard_html(articles, sheet_url):
     """
-    保存済み全ニュース（最大30件）をスマホ最適化3段レイアウト、トップ5別枠、カテゴリフィルター、最上部戻るボタン付きで構築する
+    過去1週間分の保存済みニュースをスマホ最適化レイアウト、日付別タブフィルター、カテゴリフィルター付きで構築する
     """
     top_5_articles = articles[:5]
+
+    # 日付リスト（降順）の取得
+    all_dates = sorted(list(set(a.get("date", "最新") for a in articles)), reverse=True)
+    
+    date_tabs_html = '<button class="date-btn active" onclick="filterDate(\'all\', this)">全期間</button>'
+    for d in all_dates:
+        display_d = d
+        if len(d) == 10 and "-" in d:
+            parts = d.split("-")
+            display_d = f"{int(parts[1])}/{int(parts[2])}"
+        date_tabs_html += f'<button class="date-btn" onclick="filterDate(\'{d}\', this)">📅 {display_d}</button>'
 
     # 🏆 トップ5専用カードHTML
     top5_cards_html = ""
@@ -334,11 +455,12 @@ def build_dashboard_html(articles, sheet_url):
         link = escape(article.get("link") or article.get("url") or "")
         score = article.get("score", 0)
         saved_at = escape(article.get("saved_at", "🕒 最新"))
+        item_date = escape(article.get("date", "最新"))
         cat = detect_category(title)
         cat_badge = get_category_badge_html(cat)
 
         top5_cards_html += f"""
-        <div class="top5-card" data-category="{cat}">
+        <div class="top5-card" data-category="{cat}" data-date="{item_date}">
           <div class="card-header-row">
             <span class="top-rank">🏆 第{i}位</span>
             <span class="badge badge-high">🔥 {score} pts</span>
@@ -359,6 +481,7 @@ def build_dashboard_html(articles, sheet_url):
         link = escape(article.get("link") or article.get("url") or "")
         score = article.get("score", 0)
         saved_at = escape(article.get("saved_at", "🕒 最新"))
+        item_date = escape(article.get("date", "最新"))
         cat = detect_category(title)
         cat_badge = get_category_badge_html(cat)
 
@@ -373,7 +496,7 @@ def build_dashboard_html(articles, sheet_url):
             badge_label = f"📌 {score} pts"
 
         cards_html += f"""
-        <div class="news-card" data-category="{cat}">
+        <div class="news-card" data-category="{cat}" data-date="{item_date}">
           <div class="card-header-row">
             <span class="card-num">#{i}</span>
             <span class="badge {badge_class}">{badge_label}</span>
@@ -458,9 +581,8 @@ def build_dashboard_html(articles, sheet_url):
       font-size: 0.85rem;
     }}
 
-    /* 絞り込みフィルターバー */
     .filter-section {{
-      margin-bottom: 1.25rem;
+      margin-bottom: 1rem;
     }}
     .filter-title {{
       font-size: 0.8rem;
@@ -473,7 +595,7 @@ def build_dashboard_html(articles, sheet_url):
       flex-wrap: wrap;
       gap: 0.35rem;
     }}
-    .filter-btn {{
+    .filter-btn, .date-btn {{
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       color: var(--text-main);
@@ -489,6 +611,12 @@ def build_dashboard_html(articles, sheet_url):
       background: var(--accent-blue);
       color: #0f172a;
       border-color: var(--accent-blue);
+      font-weight: 700;
+    }}
+    .date-btn:hover, .date-btn.active {{
+      background: var(--accent-purple);
+      color: #ffffff;
+      border-color: var(--accent-purple);
       font-weight: 700;
     }}
 
@@ -535,7 +663,6 @@ def build_dashboard_html(articles, sheet_url):
       flex-direction: column;
     }}
 
-    /* === 📱 スマホ用3段レイアウト === */
     .card-header-row {{
       display: flex;
       align-items: center;
@@ -651,7 +778,15 @@ def build_dashboard_html(articles, sheet_url):
       {sheet_btn_html}
     </header>
 
-    <!-- 🔍 絞り込みフィルターバー -->
+    <!-- 📅 日付絞り込みフィルターバー -->
+    <div class="filter-section">
+      <div class="filter-title">📅 配信日で絞り込み (過去1週間)</div>
+      <div class="filter-bar">
+        {date_tabs_html}
+      </div>
+    </div>
+
+    <!-- 🔍 カテゴリ絞り込みフィルターバー -->
     <div class="filter-section">
       <div class="filter-title">🔍 カテゴリ・企業で絞り込み</div>
       <div class="filter-bar">
@@ -677,18 +812,36 @@ def build_dashboard_html(articles, sheet_url):
     </main>
   </div>
 
-  <!-- 📍 画面左下に固定配置の最上部に戻るボタン -->
   <button class="scroll-to-top-btn" onclick="window.scrollTo({{top: 0, behavior: 'smooth'}})" title="一番上に戻る">▲</button>
 
   <script>
+    let activeDate = 'all';
+    let activeCategory = 'all';
+
+    function filterDate(d, btn) {{
+      document.querySelectorAll('.date-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      activeDate = d;
+      applyFilters();
+    }}
+
     function filterCategory(cat, btn) {{
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
+      activeCategory = cat;
+      applyFilters();
+    }}
 
+    function applyFilters() {{
       const items = document.querySelectorAll('.news-card, .top5-card');
       items.forEach(item => {{
         const itemCat = item.getAttribute('data-category');
-        if (cat === 'all' || itemCat === cat) {{
+        const itemDate = item.getAttribute('data-date');
+        
+        const matchCat = (activeCategory === 'all' || itemCat === activeCategory);
+        const matchDate = (activeDate === 'all' || itemDate === activeDate);
+
+        if (matchCat && matchDate) {{
           item.style.display = 'flex';
         }} else {{
           item.style.display = 'none';
@@ -806,8 +959,58 @@ def is_similar_title(t1, t2, threshold=0.50):
 
     return False
 
+def is_duplicate_with_history(entry, raw_link, final_link, history):
+    """
+    過去送信履歴 (history) と照合し、多段階で重複を判定する。
+    Stage 1: URL完全一致
+    Stage 2: GUID / ID 一致
+    Stage 3: タイトルおよび概要文の類似度一致（公開日時が新しい更新記事の場合は通過）
+    """
+    urls = history.get("urls", set())
+    past_articles = history.get("articles", [])
+
+    # Stage 1: URL完全一致
+    if raw_link in urls or final_link in urls:
+        return True, f"URL一致 ({final_link})"
+
+    guid = getattr(entry, "id", "") or getattr(entry, "guid", "")
+    title = getattr(entry, "title", "")
+    norm_title = normalize_title(title)
+    summary = extract_summary(entry)
+
+    pub_time = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+    entry_pub_ts = calendar.timegm(pub_time) if pub_time else time.time()
+
+    for past in past_articles:
+        # Stage 2: GUID一致
+        if guid and past.get("guid") and past.get("guid") == guid:
+            return True, f"GUID一致 ({guid})"
+
+        # Stage 3: タイトル・概要文類似性
+        past_title = past.get("title", "")
+        past_summary = past.get("summary", "")
+        past_norm_title = past.get("normalized_title") or normalize_title(past_title)
+
+        title_similar = (norm_title and norm_title == past_norm_title) or is_similar_title(title, past_title, threshold=0.75)
+
+        summary_similar = False
+        if summary and past_summary and len(summary) > 20 and len(past_summary) > 20:
+            if is_similar_title(summary[:100], past_summary[:100], threshold=0.70):
+                summary_similar = True
+
+        if title_similar or summary_similar:
+            past_pub_ts = past.get("published", 0)
+            # 公開日時が前回の配信記事より 6時間以上新しい場合は「最新アップデート」とみなして通過許可
+            if entry_pub_ts > past_pub_ts + 21600:
+                print(f"[最新アップデート検知] 「{title}」 (前回の過去配信日時より新しい)")
+                return False, ""
+            return True, f"過去送信済み類似ニュース: 「{past_title}」"
+
+    return False, ""
+
+
 def filter_similar_articles(articles):
-    """スコアが高い順にソートされた記事から、重複・類似トピックを除外する"""
+    """スコアが高い順にソートされた記事から、重複・類似トピックを除外する（概要文も照合）"""
     unique_articles = []
     seen_normalized_keys = set()
 
@@ -824,11 +1027,33 @@ def filter_similar_articles(articles):
                 print(f"[類似除外] 「{article['title']}」 (類似元: 「{saved['title']}」)")
                 break
 
+            sum1 = article.get("summary", "")
+            sum2 = saved.get("summary", "")
+            if sum1 and sum2 and len(sum1) > 20 and len(sum2) > 20:
+                if is_similar_title(sum1[:100], sum2[:100], threshold=0.75):
+                    is_dup = True
+                    print(f"[概要類似除外] 「{article['title']}」 (類似元: 「{saved['title']}」)")
+                    break
+
         if not is_dup:
             seen_normalized_keys.add(norm_key)
             unique_articles.append(article)
 
     return unique_articles
+
+def build_no_news_message(sheet_webapp_url=""):
+    """新規配信ニュースが0件の際、システム正常稼働中を伝える安心メッセージ"""
+    msg = (
+        "🤖【AIニュース定期チェック】\n\n"
+        "現在、前回の配信から新しく追加されたニュースはありませんでした。（システム正常稼働中）\n\n"
+        "--------------------------------\n"
+        "📊 過去1週間分のニュース一覧は以下のウェブアプリで確認できます：\n"
+    )
+    if sheet_webapp_url:
+        msg += f"🔗 {sheet_webapp_url}"
+    else:
+        msg += "(※Web App URL未設定)"
+    return msg
 
 
 def build_notification_messages(top_articles, summaries, other_count, sheet_webapp_url=""):
@@ -842,10 +1067,14 @@ def build_notification_messages(top_articles, summaries, other_count, sheet_weba
         prefix = "🔷 [Google AI] " if is_google else ""
         display_title = f"{prefix}{article['title']}"
 
+        link_url = article.get("link") or article.get("url") or ""
+        domain_name = get_domain_name(link_url)
+        domain_label = f"[{domain_name}] " if domain_name else ""
+
         if summary:
-            block = f"{i}. 📰 (Score: {article['score']})\n■ {display_title}\n{summary}\n🔗 {article['link']}"
+            block = f"{i}. 📰 (Score: {article['score']})\n■ {display_title}\n{summary}\n🔗 {domain_label}{link_url}"
         else:
-            block = f"{i}. 📰 【速報】(Score: {article['score']})\n■ {display_title}\n🔗 {article['link']}"
+            block = f"{i}. 📰 【速報】(Score: {article['score']})\n■ {display_title}\n🔗 {domain_label}{link_url}"
         blocks.append(block)
 
     footer = "\n--------------------------------"
@@ -911,67 +1140,93 @@ def main():
     if not all([LINE_ACCESS_TOKEN, LINE_USER_ID, GEMINI_API_KEY]):
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID, GEMINI_API_KEY を環境変数に設定してください")
 
-    notified_urls = load_history()
-    new_notified_urls = set(notified_urls)
+    history = load_history()
     articles_to_notify = []
     total_articles = 0
 
-    print("--- 取得記事一覧とスコア判定 ---")
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    now_ts = time.time()
+
+    print("--- 取得記事一覧とスコア・重複判定 ---")
     for rss_url in RSS_URLS:
         feed = feedparser.parse(rss_url)
         for entry in feed.entries:
             raw_link = entry.link
             title = entry.title
+            summary = extract_summary(entry)
             total_articles += 1
-
-            score = score_title(title)
-            passed = score >= SCORE_RULES["min_score"]
-            status = "Pass" if passed else "Skip"
-            print(f"[Score: {score} / {status}] {title}")
-
-            if raw_link in notified_urls:
-                continue
 
             # 公開日時の判定（過去7日以内の新鮮な記事のみ通過させる）
             if not is_recent_article(entry, MAX_ARTICLE_AGE_DAYS):
                 print(f"[日付除外] 直近{MAX_ARTICLE_AGE_DAYS}日より古い記事のためスキップ: {title}")
                 continue
 
-            if passed:
-                # リダイレクト先URLの展開（スマホ版LINEのリンク切れ対策）
-                final_link = resolve_final_url(raw_link)
-                articles_to_notify.append({
-                    "title": title,
-                    "link": final_link,
-                    "score": score
-                })
-                new_notified_urls.add(raw_link)
-                new_notified_urls.add(final_link)
+            score = score_article(title, summary)
+            passed = score >= SCORE_RULES["min_score"]
+
+            if not passed:
+                print(f"[Score: {score} / Skip] {title}")
+                continue
+
+            # リダイレクト先URLの展開
+            final_link = resolve_final_url(raw_link)
+
+            # 過去送信履歴との多層重複判定
+            is_dup, reason = is_duplicate_with_history(entry, raw_link, final_link, history)
+            if is_dup:
+                print(f"[重複スキップ ({reason})] {title}")
+                continue
+
+            print(f"[Score: {score} / Pass] {title}")
+
+            pub_time = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+            entry_pub_ts = calendar.timegm(pub_time) if pub_time else now_ts
+
+            articles_to_notify.append({
+                "title": title,
+                "normalized_title": normalize_title(title),
+                "summary": summary,
+                "link": final_link,
+                "raw_link": raw_link,
+                "score": score,
+                "guid": getattr(entry, "id", "") or getattr(entry, "guid", ""),
+                "published": entry_pub_ts,
+                "saved_at": f"🕒 {today_str}",
+                "date": today_str
+            })
 
     print("---------------------------------")
     print(f"取得総件数: {total_articles}")
-    print(f"スコア条件をクリアした件数: {len(articles_to_notify)}")
+    print(f"スコア・過去重複判定をクリアした件数: {len(articles_to_notify)}")
 
     # スコアが高い順に並び替え
     articles_to_notify.sort(key=lambda x: x["score"], reverse=True)
 
-    # 類似・重複トピックのニュースを除外
+    # 同一バッチ内の類似・重複トピックニュースを除外
     articles_to_notify = filter_similar_articles(articles_to_notify)
-    print(f"類似除外後の通知対象件数: {len(articles_to_notify)}")
-
-    if not articles_to_notify:
-        print("通知対象の新しいニュースはありませんでした。")
-        return
+    print(f"同バッチ類似除外後の通知対象件数: {len(articles_to_notify)}")
 
     webapp_url = get_webapp_url()
+
+    # 新規配信ニュースが 0件 の場合の安心メッセージ送信処理
+    if not articles_to_notify:
+        print("通知対象の新しいニュースはありませんでした。安心メッセージを送信します。")
+        no_news_msg = build_no_news_message(webapp_url)
+        send_line_message(no_news_msg)
+
+        # 過去7日分の日付別ダッシュボードを再更新
+        past_articles = history.get("articles", [])
+        if past_articles:
+            dashboard_html = build_dashboard_html(past_articles, webapp_url)
+            with open(NEWS_DASHBOARD_FILE, "w", encoding="utf-8") as f:
+                f.write(dashboard_html)
+            print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に更新しました。")
+        return
+
+    # 新規ニュースを Google Sheets へ送る
     max_saved_articles = get_max_saved_articles()
     saved_articles = select_balanced_articles(articles_to_notify, max_saved_articles)
     save_articles_to_sheets(saved_articles, webapp_url)
-
-    dashboard_html = build_dashboard_html(saved_articles, webapp_url)
-    with open(NEWS_DASHBOARD_FILE, "w", encoding="utf-8") as f:
-        f.write(dashboard_html)
-    print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に保存しました。")
 
     # スコア上位（最大5件）を要約して1つのまとめメッセージに送る
     top_articles = articles_to_notify[:5]
@@ -992,8 +1247,30 @@ def main():
             break
 
     if success:
-        save_history(new_notified_urls)
-        print("LINEへの送信が成功しました。")
+        # 送信成功した記事を履歴に追加
+        urls_set = history.get("urls", set())
+        past_list = history.get("articles", [])
+
+        for item in articles_to_notify:
+            item["notified_timestamp"] = now_ts
+            if item.get("raw_link"):
+                urls_set.add(item["raw_link"])
+            if item.get("link"):
+                urls_set.add(item["link"])
+            past_list.insert(0, item)
+
+        history["urls"] = urls_set
+        history["articles"] = past_list
+
+        save_history(history)
+        print("LINEへの送信および履歴の更新が成功しました。")
+
+        # 過去7日分蓄積された全記事でダッシュボードHTMLを生成
+        all_dashboard_articles = history.get("articles", [])
+        dashboard_html = build_dashboard_html(all_dashboard_articles, webapp_url)
+        with open(NEWS_DASHBOARD_FILE, "w", encoding="utf-8") as f:
+            f.write(dashboard_html)
+        print(f"ダッシュボードHTMLを {NEWS_DASHBOARD_FILE} に保存しました。")
 
 if __name__ == "__main__":
     main()

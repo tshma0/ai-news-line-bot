@@ -898,7 +898,17 @@ def summarize_with_gemini(title, url):
     if not GEMINI_API_KEY:
         return None
 
-    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+    candidate_models = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    ]
 
     if google_genai is not None:
         try:
@@ -918,10 +928,16 @@ def summarize_with_gemini(title, url):
             print(f"Gemini Client Error: {e}")
     elif google_generativeai is not None:
         try:
-            model = google_generativeai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(prompt)
-            if response and getattr(response, "text", None):
-                return response.text.strip()
+            google_generativeai.configure(api_key=GEMINI_API_KEY)
+            for model_name in candidate_models:
+                try:
+                    model = google_generativeai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    if response and getattr(response, "text", None):
+                        return response.text.strip()
+                except Exception as e:
+                    print(f"Gemini ({model_name}) Summarize Warning: {e}")
+                    continue
         except Exception as e:
             print(f"Gemini Summarize Error: {e}")
 

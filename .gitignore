@@ -13,6 +13,8 @@ __pycache__/
 notified_history.json
 news_dashboard.html
 gas
+specifications.md
+docs/
 
 # OS設定
 .DS_Store
